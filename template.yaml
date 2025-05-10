@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Event-Driven Order Notification System with new names
+
+Resources:
+
+  NewOrderTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: NewOrderTopic
+
+  NewOrderDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: NewOrderDLQ
+
+  NewOrderQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: NewOrderQueue
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt NewOrderDLQ.Arn
+        maxReceiveCount: 3
+
+  NewQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref NewOrderQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: "sqs:SendMessage"
+            Resource: !GetAtt NewOrderQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref NewOrderTopic
+
+  NewOrderQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NewOrderTopic
+      Protocol: sqs
+      Endpoint: !GetAtt NewOrderQueue.Arn
+      RawMessageDelivery: true
+
+  NewOrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: NewOrdersTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: orderId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: orderId
+          KeyType: HASH
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: NewLambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AmazonSQSFullAccess
+
+  NewProcessOrderFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: NewProcessOrderFunction
+      Runtime: python3.12
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: my-order-lambda-code
+        S3Key: lambda/function.zip
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref NewOrdersTable
+
+  LambdaSQSTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt NewOrderQueue.Arn
+      FunctionName: !Ref NewProcessOrderFunction
+      BatchSize: 1
+      Enabled: true
